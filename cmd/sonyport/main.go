@@ -552,6 +552,7 @@ func buildPlan(media []candidateMedia, destination, duplicateMode, dateSource st
 	summary := scanSummary{
 		ByDate: make(map[string]*dateSummary),
 	}
+	reservedTargets := make(map[string]string)
 
 	for _, item := range media {
 		switch item.Kind {
@@ -577,16 +578,15 @@ func buildPlan(media []candidateMedia, destination, duplicateMode, dateSource st
 		}
 
 		targetPath := filepath.Join(destination, dateValue, filepath.Base(item.Path))
-		targetExists := fileExists(targetPath)
-		if targetExists && duplicateMode == "skip" {
+		targetPath, skipImport, err := resolvePlannedTarget(targetPath, item.Path, duplicateMode, reservedTargets)
+		if err != nil {
+			return scanSummary{}, err
+		}
+		if skipImport {
 			day := ensureDateSummary(summary.ByDate, dateValue)
 			day.Duplicates++
 			summary.FoundDuplicates++
 			continue
-		}
-
-		if targetExists && duplicateMode == "rename" {
-			targetPath = nextAvailableTarget(targetPath)
 		}
 
 		day := ensureDateSummary(summary.ByDate, dateValue)
@@ -605,6 +605,7 @@ func buildPlan(media []candidateMedia, destination, duplicateMode, dateSource st
 			Date:       dateValue,
 			Kind:       item.Kind,
 		})
+		reservedTargets[targetPath] = item.Path
 	}
 
 	sort.Slice(summary.Items, func(i, j int) bool {
@@ -615,6 +616,37 @@ func buildPlan(media []candidateMedia, destination, duplicateMode, dateSource st
 	})
 
 	return summary, nil
+}
+
+func resolvePlannedTarget(targetPath, sourcePath, duplicateMode string, reservedTargets map[string]string) (string, bool, error) {
+	if existingSource, ok := reservedTargets[targetPath]; ok {
+		switch duplicateMode {
+		case "skip":
+			return "", true, nil
+		case "rename":
+			return nextAvailableReservedTarget(targetPath, reservedTargets), false, nil
+		case "overwrite":
+			return "", false, fmt.Errorf("multiple source files would overwrite the same target: %s and %s -> %s", existingSource, sourcePath, targetPath)
+		default:
+			return "", false, fmt.Errorf("unsupported duplicate mode: %s", duplicateMode)
+		}
+	}
+
+	switch duplicateMode {
+	case "skip":
+		if fileExists(targetPath) {
+			return "", true, nil
+		}
+	case "rename":
+		if fileExists(targetPath) {
+			return nextAvailableReservedTarget(targetPath, reservedTargets), false, nil
+		}
+	case "overwrite":
+	default:
+		return "", false, fmt.Errorf("unsupported duplicate mode: %s", duplicateMode)
+	}
+
+	return targetPath, false, nil
 }
 
 func newProgressRenderer(out io.Writer) *progressRenderer {
@@ -833,6 +865,29 @@ func nextAvailableTarget(path string) string {
 		if !fileExists(candidate) {
 			return candidate
 		}
+	}
+}
+
+func nextAvailableReservedTarget(path string, reservedTargets map[string]string) string {
+	if !fileExists(path) {
+		if _, ok := reservedTargets[path]; !ok {
+			return path
+		}
+	}
+
+	extension := filepath.Ext(path)
+	base := strings.TrimSuffix(filepath.Base(path), extension)
+	dir := filepath.Dir(path)
+
+	for i := 1; ; i++ {
+		candidate := filepath.Join(dir, fmt.Sprintf("%s_%d%s", base, i, extension))
+		if fileExists(candidate) {
+			continue
+		}
+		if _, ok := reservedTargets[candidate]; ok {
+			continue
+		}
+		return candidate
 	}
 }
 
