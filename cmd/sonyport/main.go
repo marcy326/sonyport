@@ -21,6 +21,11 @@ import (
 var version = "dev"
 
 var copyData = io.Copy
+var volumesRoot = "/Volumes"
+var userConfigDir = os.UserConfigDir
+var mdlsOutput = func(path string) ([]byte, error) {
+	return exec.Command("mdls", "-raw", "-name", "kMDItemContentCreationDate", path).Output()
+}
 
 var datePattern = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 
@@ -86,6 +91,7 @@ type scanSummary struct {
 	PlannedPhotos   int
 	PlannedVideos   int
 	FoundDuplicates int
+	MdlsFallbacks   int
 }
 
 type candidateMedia struct {
@@ -437,7 +443,11 @@ func ensureSourceLayout(source string) error {
 }
 
 func detectCameraSource() (string, error) {
-	entries, err := os.ReadDir("/Volumes")
+	return detectCameraSourceFromRoot(volumesRoot)
+}
+
+func detectCameraSourceFromRoot(root string) (string, error) {
+	entries, err := os.ReadDir(root)
 	if err != nil {
 		return "", err
 	}
@@ -450,7 +460,7 @@ func detectCameraSource() (string, error) {
 		if !entry.IsDir() {
 			continue
 		}
-		volumePath := filepath.Join("/Volumes", entry.Name())
+		volumePath := filepath.Join(root, entry.Name())
 		score := sonyScoreForVolume(volumePath)
 		if score < 0 {
 			continue
@@ -469,8 +479,8 @@ func detectCameraSource() (string, error) {
 		return "", errors.New("could not detect a mounted camera source; use --source")
 	}
 
-	if duplicateBest && bestScore < 3 {
-		return "", errors.New("multiple possible camera sources found; use --source")
+	if duplicateBest {
+		return "", errors.New("multiple equally likely camera sources found; use --source")
 	}
 
 	return bestPath, nil
@@ -574,9 +584,12 @@ func buildPlan(media []candidateMedia, destination, duplicateMode, dateSource st
 			progress.RecordPlanning(index + 1)
 		}
 
-		dateValue, err := determineDate(item, dateSource)
+		dateValue, usedFallback, err := determineDate(item, dateSource)
 		if err != nil {
 			return scanSummary{}, err
+		}
+		if usedFallback {
+			summary.MdlsFallbacks++
 		}
 
 		targetPath := filepath.Join(destination, dateValue, filepath.Base(item.Path))
@@ -818,39 +831,38 @@ func detectMediaType(path string) mediaType {
 	return mediaUnknown
 }
 
-func determineDate(item candidateMedia, dateSource string) (string, error) {
+func determineDate(item candidateMedia, dateSource string) (string, bool, error) {
 	switch dateSource {
 	case "filetime":
-		return item.Date, nil
+		return item.Date, false, nil
 	case "mdls":
 		return dateForFileUsingMdls(item)
 	default:
-		return "", fmt.Errorf("unsupported date source: %s", dateSource)
+		return "", false, fmt.Errorf("unsupported date source: %s", dateSource)
 	}
 }
 
-func dateForFileUsingMdls(item candidateMedia) (string, error) {
+func dateForFileUsingMdls(item candidateMedia) (string, bool, error) {
 	path := item.Path
-	cmd := exec.Command("mdls", "-raw", "-name", "kMDItemContentCreationDate", path)
-	output, err := cmd.Output()
+	output, err := mdlsOutput(path)
 	if err == nil {
 		raw := strings.TrimSpace(string(output))
 		if raw != "" && raw != "(null)" {
 			dateValue := strings.Fields(raw)
 			if len(dateValue) > 0 && datePattern.MatchString(dateValue[0]) {
-				return dateValue[0], nil
+				return dateValue[0], false, nil
 			}
 		}
 	}
 
 	if !item.Modified.IsZero() {
-		return item.Modified.Format("2006-01-02"), nil
+		return item.Modified.Format("2006-01-02"), true, nil
 	}
 	info, err := os.Stat(path)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
-	return info.ModTime().Format("2006-01-02"), nil
+	return info.ModTime().Format("2006-01-02"), true, nil
 }
 
 func nextAvailableTarget(path string) string {
@@ -917,25 +929,23 @@ func inspectDestination(path string) (destinationInfo, error) {
 		return destinationInfo{}, err
 	}
 	for _, entry := range entries {
-		if entry.IsDir() {
-			result.DateDirs++
+		if !entry.IsDir() || !datePattern.MatchString(entry.Name()) {
+			continue
 		}
-	}
+		result.DateDirs++
 
-	err = filepath.WalkDir(path, func(current string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
+		dateEntries, err := os.ReadDir(filepath.Join(path, entry.Name()))
+		if err != nil {
+			return destinationInfo{}, err
 		}
-		if d.IsDir() {
-			return nil
+		for _, dateEntry := range dateEntries {
+			if dateEntry.IsDir() {
+				continue
+			}
+			if detectMediaType(dateEntry.Name()) != mediaUnknown {
+				result.MediaFiles++
+			}
 		}
-		if detectMediaType(current) != mediaUnknown {
-			result.MediaFiles++
-		}
-		return nil
-	})
-	if err != nil {
-		return destinationInfo{}, err
 	}
 
 	return result, nil
@@ -944,7 +954,7 @@ func inspectDestination(path string) (destinationInfo, error) {
 func loadState() (*persistedState, error) {
 	statePath, err := stateFilePath()
 	if err != nil {
-		return nil, nil
+		return nil, err
 	}
 
 	data, err := os.ReadFile(statePath)
@@ -957,7 +967,7 @@ func loadState() (*persistedState, error) {
 
 	var state persistedState
 	if err := json.Unmarshal(data, &state); err != nil {
-		return nil, err
+		return nil, nil
 	}
 
 	if state.LastDestination == "" && state.Destination != "" {
@@ -978,7 +988,7 @@ func loadState() (*persistedState, error) {
 func saveState(state persistedState) error {
 	statePath, err := stateFilePath()
 	if err != nil {
-		return nil
+		return err
 	}
 
 	if err := os.MkdirAll(filepath.Dir(statePath), 0o755); err != nil {
@@ -994,7 +1004,7 @@ func saveState(state persistedState) error {
 }
 
 func stateFilePath() (string, error) {
-	configDir, err := os.UserConfigDir()
+	configDir, err := userConfigDir()
 	if err != nil {
 		return "", err
 	}
@@ -1060,6 +1070,9 @@ func printSummary(w io.Writer, source, destination string, opts options, destInf
 	fmt.Fprintf(w, "  Planned photos: %d\n", scan.PlannedPhotos)
 	fmt.Fprintf(w, "  Planned videos: %d\n", scan.PlannedVideos)
 	fmt.Fprintf(w, "  Found duplicates: %d\n", scan.FoundDuplicates)
+	if scan.MdlsFallbacks > 0 {
+		fmt.Fprintf(w, "  Metadata fallbacks to filetime: %d\n", scan.MdlsFallbacks)
+	}
 }
 
 func printPlannedActions(w io.Writer, items []plannedImport, dryRun bool) {
