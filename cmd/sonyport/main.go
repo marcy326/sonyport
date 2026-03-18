@@ -20,6 +20,8 @@ import (
 
 var version = "dev"
 
+var copyData = io.Copy
+
 var datePattern = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 
 var photoExtensions = map[string]struct{}{
@@ -1138,19 +1140,45 @@ func copyFile(sourcePath, targetPath string) error {
 		return err
 	}
 
-	target, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode().Perm())
+	tempFile, err := os.CreateTemp(filepath.Dir(targetPath), "."+filepath.Base(targetPath)+".tmp-*")
 	if err != nil {
 		return err
 	}
+	tempPath := tempFile.Name()
+	cleanupTemp := true
+	defer func() {
+		if cleanupTemp {
+			_ = os.Remove(tempPath)
+		}
+	}()
 
-	if _, err := io.Copy(target, source); err != nil {
-		target.Close()
+	if err := tempFile.Chmod(info.Mode().Perm()); err != nil {
+		tempFile.Close()
 		return err
 	}
 
-	if err := target.Close(); err != nil {
+	if _, err := copyData(tempFile, source); err != nil {
+		tempFile.Close()
 		return err
 	}
 
-	return os.Chtimes(targetPath, info.ModTime(), info.ModTime())
+	if err := tempFile.Sync(); err != nil {
+		tempFile.Close()
+		return err
+	}
+
+	if err := tempFile.Close(); err != nil {
+		return err
+	}
+
+	if err := os.Chtimes(tempPath, info.ModTime(), info.ModTime()); err != nil {
+		return err
+	}
+
+	if err := os.Rename(tempPath, targetPath); err != nil {
+		return err
+	}
+
+	cleanupTemp = false
+	return nil
 }
