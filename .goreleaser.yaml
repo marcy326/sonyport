@@ -1,0 +1,57 @@
+version: 2
+
+project_name: sonyport
+
+before:
+  hooks:
+    - go test ./...
+
+builds:
+  - id: sonyport
+    main: ./cmd/sonyport
+    binary: sonyport
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - id: sonyport-archive
+    ids:
+      - sonyport
+    formats:
+      - zip
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+
+release:
+  github:
+    owner: marcy326
+    name: sonyport
+
+brews:
+  - name: sonyport
+    ids:
+      - sonyport-archive
+    directory: Formula
+    homepage: "https://github.com/marcy326/sonyport"
+    description: "Unofficial macOS CLI for importing photos and videos from mounted Sony cameras"
+    license: "MIT"
+    commit_msg_template: "chore: update sonyport formula to {{ .Tag }}"
+    repository:
+      owner: marcy326
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    commit_author:
+      name: github-actions[bot]
+      email: 41898282+github-actions[bot]@users.noreply.github.com
+    test: |
+      system "#{bin}/sonyport", "--help"

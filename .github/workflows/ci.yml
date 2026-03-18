@@ -1,0 +1,20 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  smoke-test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Run go test
+        run: go test ./...
+      - name: Run smoke test
+        run: ./tests/smoke.sh
+      - name: Run Homebrew test
+        run: ./tests/homebrew.sh
