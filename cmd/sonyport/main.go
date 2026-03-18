@@ -228,16 +228,6 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 
 	printSummary(stdout, sourcePath, destinationPath, opts, destInfo, state, scan)
 
-	if state == nil {
-		state = &persistedState{}
-	}
-	state.LastDestination = destinationPath
-	state.LastSource = sourcePath
-	state.LastUsedAt = time.Now().Format(time.RFC3339)
-	if err := saveState(*state); err != nil {
-		return err
-	}
-
 	if scan.FoundPhotos == 0 && scan.FoundVideos == 0 {
 		fmt.Fprintln(stdout, "\nNo supported photos or videos were found under DCIM.")
 		return nil
@@ -315,6 +305,9 @@ func run(args []string, stdin io.Reader, stdout, stderr io.Writer) error {
 		importProgress.Finish(progressLine("Importing", len(scan.Items), len(scan.Items)))
 	}
 
+	if state == nil {
+		state = &persistedState{}
+	}
 	state.LastDestination = destinationPath
 	state.LastSource = sourcePath
 	state.LastUsedAt = time.Now().Format(time.RFC3339)
